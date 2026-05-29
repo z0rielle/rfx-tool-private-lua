@@ -21,8 +21,9 @@ local FARMING_START_DETECTION = "LISTED"
 -- ============================================================
 -- KEAMANAN
 -- ============================================================
-local ENABLE_GM_DETECTION = true  -- true = bot berhenti total saat GM terdeteksi
-local GM_DETECTION_RADIUS = 1000
+local ENABLE_GM_DETECTION  = true  -- true = bot berhenti saat GM terdeteksi
+local ENABLE_GM_AUTO_RESUME = true  -- true = bot otomatis jalan lagi saat GM sudah pergi
+local GM_DETECTION_RADIUS  = 1000
 
 local ENABLE_DEATH_STOP  = false  -- true = bot berhenti setelah mati sejumlah MAX_DEATHS_ALLOWED
 local MAX_DEATHS_ALLOWED = 2
@@ -91,6 +92,7 @@ local last_follow_check_ms       = 0
 local bot_was_running            = false  -- Untuk deteksi transisi nyala → mati
 local buff_queue                 = {}
 local farming_started            = false  -- true setelah monster pertama terdeteksi di spot
+local gm_detected                = false  -- true saat GM sedang berada di radius
 
 -------------------------------------------------------------------------------
 -- [3] FUNGSI UTILITAS
@@ -135,6 +137,7 @@ end
 -------------------------------------------------------------------------------
 local function check_for_gm(current_pos)
     if not ENABLE_GM_DETECTION then return false end
+    if gm_detected then return true end  -- Sudah dalam mode AFK, skip deteksi ulang
 
     local current_ms = now_ms()
     if (current_ms - last_gm_check_ms) < 500 then return false end
@@ -144,9 +147,9 @@ local function check_for_gm(current_pos)
     pcall(function()
         local players = game.get_closest_characters(ActorGroup.OtherPlayers, current_pos.x, current_pos.y, current_pos.z, GM_DETECTION_RADIUS, {}) or {}
         for _, player in ipairs(players) do
-            -- Deteksi GM berdasarkan nama (sesuai API yang tersedia)
+            -- Deteksi GM berdasarkan prefix [GM] yang exact (bukan substring bebas)
             local name = (game.get_character_name(player.ptr) or ""):upper()
-            if name:find("GM") or name:find("ADMIN") then
+            if name:find("^%[GM%]") then
                 gm_found = true
                 break
             end
@@ -154,16 +157,46 @@ local function check_for_gm(current_pos)
     end)
 
     if gm_found then
-        actions.display_message("EMERGENCY: GM TERDETEKSI! MEMATIKAN BOT SEGERA...")
-        bot.show_notification("EMERGENCY: GM TERDETEKSI! BOT DIMATIKAN.")
+        gm_detected = true
+        actions.display_message("GM TERDETEKSI! Bot dimatikan sementara...")
+        bot.show_notification("GM TERDETEKSI! Bot dimatikan sementara.")
         bot.clear_queue()
         actions.force_disable_auto_attack()
         bot.stop()
-        loop_active = false
         return true
     end
 
     return false
+end
+
+local function check_gm_gone(current_pos)
+    -- Hanya aktif jika GM pernah terdeteksi sebelumnya
+    if not gm_detected then return end
+    if not ENABLE_GM_AUTO_RESUME then return end
+
+    local current_ms = now_ms()
+    if (current_ms - last_gm_check_ms) < 500 then return end
+    last_gm_check_ms = current_ms
+
+    local gm_still_here = false
+    pcall(function()
+        local players = game.get_closest_characters(ActorGroup.OtherPlayers, current_pos.x, current_pos.y, current_pos.z, GM_DETECTION_RADIUS, {}) or {}
+        for _, player in ipairs(players) do
+            local name = (game.get_character_name(player.ptr) or ""):upper()
+            if name:find("^%[GM%]") then
+                gm_still_here = true
+                break
+            end
+        end
+    end)
+
+    if not gm_still_here then
+        gm_detected = false
+        actions.display_message("GM sudah pergi. Menjalankan bot kembali...")
+        bot.show_notification("GM sudah pergi. Bot dijalankan kembali.")
+        actions.restore_auto_attack()
+        bot.start()
+    end
 end
 
 local function handle_player_death()
@@ -394,6 +427,10 @@ local function main_farming_logic()
     if not current_pos then return end
 
     if check_for_gm(current_pos) then return end
+    check_gm_gone(current_pos)
+
+    -- Selama GM masih ada, hanya jalankan pengecekan — tidak ada farming
+    if gm_detected then return end
 
     -- Fitur pasif tetap berjalan saat traveling
     manage_animus_summoning()
