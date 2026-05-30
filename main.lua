@@ -159,6 +159,7 @@ local function send_death_log(recent_deaths)
 
     for _, name in ipairs(REMOTE_WHITELIST) do
         actions.send_private_message(name, msg)
+        sleep(500)
     end
 end
 
@@ -316,8 +317,11 @@ local function check_blacklist(current_pos)
         bot.show_notification("[Blacklist] " .. found_name .. " terdeteksi!")
         -- Kirim notifikasi ke whitelist
         if #REMOTE_WHITELIST > 0 then
-            local targets = table.concat(REMOTE_WHITELIST, ",")
-            actions.send_private_message(targets, "[Blacklist] " .. found_name .. " terdeteksi di radius!")
+            local notif_msg = "[Blacklist] " .. found_name .. " terdeteksi di radius!"
+            for _, name in ipairs(REMOTE_WHITELIST) do
+                actions.send_private_message(name, notif_msg)
+                sleep(500)
+            end
         end
         bot.clear_queue()
         actions.force_disable_auto_attack()
@@ -623,8 +627,8 @@ repeat
         local is_running  = ok and running
 
         -- Hanya break jika bot baru saja dimatikan (transisi nyala → mati)
-        -- Jika bot memang sudah off sejak awal, Lua tetap berjalan
-        if bot_was_running and not is_running and not remote_stopped then break end
+        -- Jika bot memang sudah off sejak awal, atau dalam mode standby, Lua tetap berjalan
+        if bot_was_running and not is_running and not remote_stopped and not gm_detected and not blacklist_detected then break end
         bot_was_running = is_running
 
         local is_dead = false
