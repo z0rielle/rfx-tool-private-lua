@@ -62,6 +62,20 @@ local ENABLE_PLAYER_LOCKING = false
 local TARGET_PLAYER_NAME    = "NICKNAME"  -- Nama player yang selalu di-target
 
 -- ============================================================
+-- REMOTE CONTROL (via private chat / common chat)
+-- ============================================================
+-- Whitelist nama player yang boleh mengirim perintah remote
+-- Perintah via whisper atau chat umum:
+--   "!stop"  = matikan bot & tools, hentikan Lua
+--   "!start" = jalankan bot kembali (jika Lua masih aktif)
+local ENABLE_REMOTE_CONTROL = true
+local REMOTE_WHITELIST = {
+    "NICKNAME_KAMU",   -- Ganti dengan nama char kamu sendiri atau teman terpercaya
+}
+local REMOTE_CMD_STOP  = "!stop"
+local REMOTE_CMD_START = "!start"
+
+-- ============================================================
 -- BUFF REQUEST (via private chat)
 -- ============================================================
 local ENABLE_BUFF_REQUEST = true
@@ -93,6 +107,7 @@ local bot_was_running            = false  -- Untuk deteksi transisi nyala → ma
 local buff_queue                 = {}
 local farming_started            = false  -- true setelah monster pertama terdeteksi di spot
 local gm_detected                = false  -- true saat GM sedang berada di radius
+local remote_stopped             = false  -- true jika bot dimatikan via remote command
 
 -------------------------------------------------------------------------------
 -- [3] FUNGSI UTILITAS
@@ -109,26 +124,63 @@ end
 -- [4] SETUP EVENT LISTENER
 -- Didaftarkan di awal agar tidak ada private message yang terlewat
 -------------------------------------------------------------------------------
-if ENABLE_BUFF_REQUEST then
-    local function find_buff_config(message)
-        local lower = message:lower()
-        for _, config in ipairs(BUFF_CONFIG) do
-            for _, keyword in ipairs(config.keywords) do
-                if lower:match(string.lower(keyword)) then
-                    return config
-                end
+
+-- Helper: cek apakah sender ada di whitelist (case-insensitive)
+local function is_whitelisted(sender)
+    local lower = sender:lower()
+    for _, name in ipairs(REMOTE_WHITELIST) do
+        if lower == name:lower() then return true end
+    end
+    return false
+end
+
+local function handle_remote_command(sender, message)
+    if not ENABLE_REMOTE_CONTROL then return end
+    if not is_whitelisted(sender) then return end
+
+    local cmd = message:lower():match("^%s*(.-)%s*$")  -- trim whitespace
+
+    if cmd == REMOTE_CMD_STOP then
+        remote_stopped = true
+        actions.display_message("[Remote] Diperintah stop oleh: " .. sender)
+        bot.show_notification("[Remote] Bot dimatikan oleh: " .. sender)
+        bot.clear_queue()
+        actions.force_disable_auto_attack()
+        bot.stop()
+        loop_active = false
+
+    elseif cmd == REMOTE_CMD_START then
+        if not remote_stopped then return end  -- Jangan start jika belum pernah di-stop via remote
+        remote_stopped = false
+        loop_active    = true
+        actions.display_message("[Remote] Diperintah start oleh: " .. sender)
+        bot.show_notification("[Remote] Bot dijalankan oleh: " .. sender)
+        actions.restore_auto_attack()
+        bot.start()
+    end
+end
+
+-- Daftarkan listener untuk private chat dan common chat
+events.on_private_message(function(sender, message)
+    handle_remote_command(sender, message)
+
+    if not ENABLE_BUFF_REQUEST then return end
+    local lower = message:lower()
+    for _, config in ipairs(BUFF_CONFIG) do
+        for _, keyword in ipairs(config.keywords) do
+            if lower:match(string.lower(keyword)) then
+                table.insert(buff_queue, { name = sender, bar = config.bar, cell = config.cell })
+                return
             end
         end
-        return nil
     end
+end)
 
-    events.on_private_message(function(sender, message)
-        local config = find_buff_config(message)
-        if config then
-            table.insert(buff_queue, { name = sender, bar = config.bar, cell = config.cell })
-        end
-    end)
+events.on_common_message(function(sender, message)
+    handle_remote_command(sender, message)
+end)
 
+if ENABLE_BUFF_REQUEST then
     actions.display_message("[Buff Request] Mendengarkan private chat...")
 end
 
@@ -472,23 +524,33 @@ end
 -------------------------------------------------------------------------------
 -- [6] MAIN LOOP
 -------------------------------------------------------------------------------
-while loop_active do
-    local ok, running = pcall(function() return bot.is_running() end)
-    local is_running  = ok and running
+repeat
+    loop_active     = true
+    bot_was_running = false
 
-    -- Hanya break jika bot baru saja dimatikan (transisi nyala → mati)
-    -- Jika bot memang sudah off sejak awal, Lua tetap berjalan
-    if bot_was_running and not is_running then break end
-    bot_was_running = is_running
+    while loop_active do
+        local ok, running = pcall(function() return bot.is_running() end)
+        local is_running  = ok and running
 
-    local is_dead = false
-    pcall(function() is_dead = game.is_player_dead() end)
+        -- Hanya break jika bot baru saja dimatikan (transisi nyala → mati)
+        -- Jika bot memang sudah off sejak awal, Lua tetap berjalan
+        if bot_was_running and not is_running and not remote_stopped then break end
+        bot_was_running = is_running
 
-    if is_dead then
-        handle_player_death()
-    else
-        main_farming_logic()
+        local is_dead = false
+        pcall(function() is_dead = game.is_player_dead() end)
+
+        if is_dead then
+            handle_player_death()
+        else
+            main_farming_logic()
+        end
+
+        sleep(300)
     end
 
-    sleep(300)
-end
+    -- Jika keluar loop karena remote stop, tunggu perintah !start
+    if remote_stopped then
+        sleep(500)
+    end
+until not remote_stopped  -- Keluar outer loop hanya jika bukan karena remote stop
