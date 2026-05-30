@@ -333,6 +333,8 @@ local function check_blacklist(current_pos)
 end
 
 local function handle_player_death()
+    local pending_death_log = nil  -- Ditahan sampai player hidup kembali
+
     if not death_counted_this_session then
         death_counted_this_session = true
 
@@ -350,8 +352,8 @@ local function handle_player_death()
 
         actions.display_message("Death recorded! [" .. recent_deaths .. "/" .. MAX_DEATHS_ALLOWED .. "]")
 
-        -- Kirim death log ke whitelist terlepas dari ENABLE_DEATH_STOP
-        send_death_log(recent_deaths)
+        -- Simpan dulu, kirim setelah hidup kembali karena chat tidak bisa dikirim saat mati
+        pending_death_log = recent_deaths
 
         if ENABLE_DEATH_STOP and recent_deaths >= MAX_DEATHS_ALLOWED then
             actions.display_message("CRITICAL: Death limit reached! Terminating bot...")
@@ -387,6 +389,11 @@ local function handle_player_death()
             pcall(function() dead = game.is_player_dead() end)
             if not dead then break end
         end
+    end
+
+    -- Kirim death log setelah player hidup kembali
+    if pending_death_log then
+        send_death_log(pending_death_log)
     end
 end
 
