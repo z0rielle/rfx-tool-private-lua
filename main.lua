@@ -21,13 +21,27 @@ local FARMING_START_DETECTION = "LISTED"
 -- ============================================================
 -- KEAMANAN
 -- ============================================================
-local ENABLE_GM_DETECTION  = true  -- true = bot berhenti saat GM terdeteksi
+local ENABLE_GM_DETECTION   = true  -- true = bot berhenti saat GM terdeteksi
 local ENABLE_GM_AUTO_RESUME = true  -- true = bot otomatis jalan lagi saat GM sudah pergi
-local GM_DETECTION_RADIUS  = 1000
+local GM_DETECTION_RADIUS   = 1000
 
 local ENABLE_DEATH_STOP  = false  -- true = bot berhenti setelah mati sejumlah MAX_DEATHS_ALLOWED
 local MAX_DEATHS_ALLOWED = 2
 local DEATH_RESET_TICKS  = 3000   -- Window tick untuk menghitung ulang kematian (~300ms per tick)
+
+-- Death Log — kirim whisper ke semua REMOTE_WHITELIST saat player mati
+-- Timestamp format hh:mm:ss dihitung dari saat script dijalankan
+local ENABLE_DEATH_LOG = true
+
+-- Blacklist player — bot AFK jika player yang diblacklist terdeteksi di radius
+-- Bot otomatis jalan kembali jika player sudah keluar dari radius
+local ENABLE_BLACKLIST        = true
+local BLACKLIST_RADIUS        = 500   -- Radius pemantauan player blacklist
+local BLACKLIST_CHECK_INTERVAL = 2000 -- Interval pengecekan dalam ms (jangan terlalu kecil)
+local PLAYER_BLACKLIST = {
+    -- "NamaMusuh1",
+    -- "NamaMusuh2",
+}
 
 -- ============================================================
 -- ANIMUS
@@ -108,6 +122,9 @@ local buff_queue                 = {}
 local farming_started            = false  -- true setelah monster pertama terdeteksi di spot
 local gm_detected                = false  -- true saat GM sedang berada di radius
 local remote_stopped             = false  -- true jika bot dimatikan via remote command
+local blacklist_detected         = false  -- true saat player blacklist terdeteksi di radius
+local last_blacklist_check_ms    = 0
+local session_start_ms           = now_ms()  -- Waktu script dijalankan, untuk format timestamp
 
 -------------------------------------------------------------------------------
 -- [3] FUNGSI UTILITAS
@@ -118,6 +135,31 @@ local function get_distance(pos1, pos2)
     local dy = pos1.y - pos2.y
     local dz = pos1.z - pos2.z
     return math.sqrt(dx*dx + dy*dy + dz*dz)
+end
+
+-- Konversi millisecond (sejak script start) ke format hh:mm:ss
+local function ms_to_timestamp(ms)
+    local total_sec = math.floor(ms / 1000)
+    local hh = math.floor(total_sec / 3600)
+    local mm = math.floor((total_sec % 3600) / 60)
+    local ss = total_sec % 60
+    return string.format("%02d:%02d:%02d", hh, mm, ss)
+end
+
+-- Kirim death log ke semua player di REMOTE_WHITELIST sekaligus
+local function send_death_log(recent_deaths)
+    if not ENABLE_DEATH_LOG then return end
+    if #REMOTE_WHITELIST == 0 then return end
+
+    local elapsed   = now_ms() - session_start_ms
+    local timestamp = ms_to_timestamp(elapsed)
+    local msg       = string.format("[Death Log] %s | Deaths: %d/%d | Uptime: %s",
+                        game.get_player_name() or "Unknown",
+                        recent_deaths, MAX_DEATHS_ALLOWED, timestamp)
+
+    -- Gabung semua nama whitelist dengan koma untuk satu kali kirim
+    local targets = table.concat(REMOTE_WHITELIST, ",")
+    actions.send_private_message(targets, msg)
 end
 
 -------------------------------------------------------------------------------
@@ -251,33 +293,73 @@ local function check_gm_gone(current_pos)
     end
 end
 
+local function check_blacklist(current_pos)
+    if not ENABLE_BLACKLIST or #PLAYER_BLACKLIST == 0 then return end
+
+    local current_ms = now_ms()
+    if (current_ms - last_blacklist_check_ms) < BLACKLIST_CHECK_INTERVAL then return end
+    last_blacklist_check_ms = current_ms
+
+    local found_name = nil
+    pcall(function()
+        for _, name in ipairs(PLAYER_BLACKLIST) do
+            if game.are_characters_with_names_nearby(ActorGroup.OtherPlayers, BLACKLIST_RADIUS, { name }) then
+                found_name = name
+                break
+            end
+        end
+    end)
+
+    if found_name and not blacklist_detected then
+        blacklist_detected = true
+        actions.display_message("[Blacklist] " .. found_name .. " terdeteksi! Bot dimatikan sementara...")
+        bot.show_notification("[Blacklist] " .. found_name .. " terdeteksi!")
+        -- Kirim notifikasi ke whitelist
+        if #REMOTE_WHITELIST > 0 then
+            local targets = table.concat(REMOTE_WHITELIST, ",")
+            actions.send_private_message(targets, "[Blacklist] " .. found_name .. " terdeteksi di radius!")
+        end
+        bot.clear_queue()
+        actions.force_disable_auto_attack()
+        bot.stop()
+
+    elseif not found_name and blacklist_detected then
+        blacklist_detected = false
+        actions.display_message("[Blacklist] Area aman. Menjalankan bot kembali...")
+        bot.show_notification("[Blacklist] Area aman. Bot dijalankan kembali.")
+        actions.restore_auto_attack()
+        bot.start()
+    end
+end
+
 local function handle_player_death()
     if not death_counted_this_session then
         death_counted_this_session = true
 
-        if ENABLE_DEATH_STOP then
-            table.insert(death_loop_records, now_ms())
+        table.insert(death_loop_records, now_ms())
 
-            local recent_deaths = 0
-            local cutoff = now_ms() - (DEATH_RESET_TICKS * 300)
-            for i = #death_loop_records, 1, -1 do
-                if death_loop_records[i] >= cutoff then
-                    recent_deaths = recent_deaths + 1
-                else
-                    table.remove(death_loop_records, i)
-                end
+        local recent_deaths = 0
+        local cutoff = now_ms() - (DEATH_RESET_TICKS * 300)
+        for i = #death_loop_records, 1, -1 do
+            if death_loop_records[i] >= cutoff then
+                recent_deaths = recent_deaths + 1
+            else
+                table.remove(death_loop_records, i)
             end
+        end
 
-            actions.display_message("Death recorded! [" .. recent_deaths .. "/" .. MAX_DEATHS_ALLOWED .. "]")
+        actions.display_message("Death recorded! [" .. recent_deaths .. "/" .. MAX_DEATHS_ALLOWED .. "]")
 
-            if recent_deaths >= MAX_DEATHS_ALLOWED then
-                actions.display_message("CRITICAL: Death limit reached! Terminating bot...")
-                bot.clear_queue()
-                actions.restore_auto_attack()
-                bot.stop()
-                loop_active = false
-                return
-            end
+        -- Kirim death log ke whitelist terlepas dari ENABLE_DEATH_STOP
+        send_death_log(recent_deaths)
+
+        if ENABLE_DEATH_STOP and recent_deaths >= MAX_DEATHS_ALLOWED then
+            actions.display_message("CRITICAL: Death limit reached! Terminating bot...")
+            bot.clear_queue()
+            actions.restore_auto_attack()
+            bot.stop()
+            loop_active = false
+            return
         end
     end
 
@@ -480,9 +562,10 @@ local function main_farming_logic()
 
     if check_for_gm(current_pos) then return end
     check_gm_gone(current_pos)
+    check_blacklist(current_pos)
 
-    -- Selama GM masih ada, hanya jalankan pengecekan — tidak ada farming
-    if gm_detected then return end
+    -- Selama GM atau blacklist player masih ada, skip farming
+    if gm_detected or blacklist_detected then return end
 
     -- Fitur pasif tetap berjalan saat traveling
     manage_animus_summoning()
