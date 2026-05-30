@@ -146,7 +146,7 @@ local function ms_to_timestamp(ms)
     return string.format("%02d:%02d:%02d", hh, mm, ss)
 end
 
--- Kirim death log ke semua player di REMOTE_WHITELIST sekaligus
+-- Kirim death log ke semua player di REMOTE_WHITELIST
 local function send_death_log(recent_deaths)
     if not ENABLE_DEATH_LOG then return end
     if #REMOTE_WHITELIST == 0 then return end
@@ -157,9 +157,9 @@ local function send_death_log(recent_deaths)
                         game.get_player_name() or "Unknown",
                         recent_deaths, MAX_DEATHS_ALLOWED, timestamp)
 
-    -- Gabung semua nama whitelist dengan koma untuk satu kali kirim
-    local targets = table.concat(REMOTE_WHITELIST, ",")
-    actions.send_private_message(targets, msg)
+    for _, name in ipairs(REMOTE_WHITELIST) do
+        actions.send_private_message(name, msg)
+    end
 end
 
 -------------------------------------------------------------------------------
