@@ -62,6 +62,12 @@ local C_PANEL_BARIS_KE  = 10  -- Slot Summon Animus
 local ENABLE_AUTO_HEAL = false  -- true = animus otomatis heal target yang sedang di-target
 
 -- ============================================================
+-- INVENTORY
+-- ============================================================
+-- Jika inventory penuh, game akan ditutup otomatis
+local ENABLE_KILL_ON_INVENTORY_FULL = true
+
+-- ============================================================
 -- FOLLOW TARGET
 -- ============================================================
 local ENABLE_FOLLOW_TARGET = true
@@ -124,6 +130,7 @@ local gm_detected                = false  -- true saat GM sedang berada di radiu
 local remote_stopped             = false  -- true jika bot dimatikan via remote command
 local blacklist_detected         = false  -- true saat player blacklist terdeteksi di radius
 local last_blacklist_check_ms    = 0
+local last_inventory_check_ms   = 0
 local session_start_ms           = now_ms()  -- Waktu script dijalankan, untuk format timestamp
 
 -------------------------------------------------------------------------------
@@ -258,6 +265,14 @@ local function check_for_gm(current_pos)
         bot.clear_queue()
         actions.force_disable_auto_attack()
         bot.stop()
+        -- Kirim notifikasi GM ke semua whitelist
+        if #REMOTE_WHITELIST > 0 then
+            local gm_msg = "[GM Alert] GM terdeteksi di radius!"
+            for _, name in ipairs(REMOTE_WHITELIST) do
+                actions.send_private_message(name, gm_msg)
+                sleep(500)
+            end
+        end
         return true
     end
 
@@ -399,6 +414,34 @@ local function handle_player_death()
     if pending_death_log then
         send_death_log(pending_death_log)
     end
+end
+
+local function manage_inventory()
+    if not ENABLE_KILL_ON_INVENTORY_FULL then return end
+
+    local current_ms = now_ms()
+    if (current_ms - last_inventory_check_ms) < 5000 then return end
+    last_inventory_check_ms = current_ms
+
+    local is_full = false
+    pcall(function() is_full = game.is_inventory_full() end)
+
+    if not is_full then return end
+
+    actions.display_message("Inventory penuh! Menutup game...")
+    bot.show_notification("Inventory penuh! Game akan ditutup.")
+
+    -- Notifikasi ke whitelist sebelum game ditutup
+    if #REMOTE_WHITELIST > 0 then
+        local msg = "[Inventory] Inventory penuh! Game ditutup."
+        for _, name in ipairs(REMOTE_WHITELIST) do
+            actions.send_private_message(name, msg)
+            sleep(500)
+        end
+    end
+
+    sleep(500)
+    actions.kill_game_process()
 end
 
 local function manage_patrol_movement(current_pos)
@@ -580,6 +623,7 @@ local function main_farming_logic()
 
     -- Fitur pasif tetap berjalan saat traveling
     manage_animus_summoning()
+    manage_inventory()
     manage_buff_request()
     manage_follow_target()
     manage_auto_heal()   -- Sebelum player_locking agar target tidak di-override dulu
@@ -635,6 +679,7 @@ repeat
         pcall(function() is_dead = game.is_player_dead() end)
 
         if is_dead then
+            -- Revive selalu dijalankan terlepas dari state GM/blacklist
             handle_player_death()
         else
             main_farming_logic()
