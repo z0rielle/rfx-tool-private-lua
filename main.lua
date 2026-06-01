@@ -5,8 +5,16 @@
 -- ============================================================
 -- FARMING
 -- ============================================================
--- Titik jangkar yang akan dituju & dijaga bot
-local ANCHOR_POS        = { x = 2136, y = -1572, z = -7859 }
+-- Daftar titik jangkar — bot akan rotasi ke spot berikutnya jika monster
+-- tidak terdeteksi di spot saat ini selama ANCHOR_ROTATE_TIMEOUT ms
+-- Jika hanya ingin 1 spot, isi hanya 1 entry di tabel
+local ANCHOR_SPOTS = {
+    { x = 2136,  y = -1572, z = -7859 },  -- Spot 1
+    -- { x = 1000,  y = -2000, z = -7859 },  -- Spot 2 (contoh, uncomment untuk aktifkan)
+    -- { x = 3000,  y = -1000, z = -7859 },  -- Spot 3
+}
+local ANCHOR_ROTATE_TIMEOUT = 30000  -- ms tanpa monster sebelum rotasi ke spot berikutnya (30 detik)
+
 local HUNT_RADIUS       = 150   -- Radius pencarian monster dari titik jangkar
 local ARRIVAL_TOLERANCE = 15    -- Toleransi jarak dianggap sudah sampai di jangkar
 local TARGET_MONSTERS   = { "Assassin Builder A", "[50] Assassin Builder A" }
@@ -130,7 +138,9 @@ local gm_detected                = false  -- true saat GM sedang berada di radiu
 local remote_stopped             = false  -- true jika bot dimatikan via remote command
 local blacklist_detected         = false  -- true saat player blacklist terdeteksi di radius
 local last_blacklist_check_ms    = 0
-local last_inventory_check_ms   = 0
+local last_inventory_check_ms    = 0
+local current_anchor_index       = 1      -- Index spot aktif saat ini
+local last_monster_seen_ms       = now_ms()  -- Terakhir kali monster terdeteksi di spot aktif
 local session_start_ms           = now_ms()  -- Waktu script dijalankan, untuk format timestamp
 
 -------------------------------------------------------------------------------
@@ -444,14 +454,29 @@ local function manage_inventory()
     actions.kill_game_process()
 end
 
+local function get_current_anchor()
+    return ANCHOR_SPOTS[current_anchor_index]
+end
+
+local function rotate_anchor()
+    if #ANCHOR_SPOTS <= 1 then return end
+    local prev = current_anchor_index
+    current_anchor_index = (current_anchor_index % #ANCHOR_SPOTS) + 1
+    last_monster_seen_ms = now_ms()
+    is_returning         = false
+    farming_started      = false  -- Tunggu deteksi monster di spot baru
+    actions.display_message("Rotasi spot: " .. prev .. " → " .. current_anchor_index)
+end
+
 local function manage_patrol_movement(current_pos)
     if not ENABLE_ANCHOR_RETURN then return end
 
-    local dist = get_distance(current_pos, ANCHOR_POS)
+    local anchor = get_current_anchor()
+    local dist   = get_distance(current_pos, anchor)
 
     if dist <= ARRIVAL_TOLERANCE then
         if is_returning then
-            actions.display_message("Back at anchor point. Monitoring area...")
+            actions.display_message("Back at anchor point " .. current_anchor_index .. ". Monitoring area...")
             actions.restore_auto_attack()
             is_returning = false
         end
@@ -459,13 +484,13 @@ local function manage_patrol_movement(current_pos)
     end
 
     if not is_returning then
-        actions.display_message("Monsters cleared! Returning to anchor point...")
+        actions.display_message("Returning to anchor point " .. current_anchor_index .. "...")
         bot.clear_queue()
         actions.force_disable_auto_attack()
-        actions.move_player(ANCHOR_POS.x, ANCHOR_POS.y, ANCHOR_POS.z)
+        actions.move_player(anchor.x, anchor.y, anchor.z)
         is_returning = true
     elseif bot.is_queue_empty() then
-        actions.move_player(ANCHOR_POS.x, ANCHOR_POS.y, ANCHOR_POS.z)
+        actions.move_player(anchor.x, anchor.y, anchor.z)
     end
 end
 
@@ -590,10 +615,8 @@ local function check_farming_started(current_pos)
     local detected = false
     pcall(function()
         if FARMING_START_DETECTION == "ANY" then
-            -- Terdeteksi monster apapun dalam radius
             detected = game.are_characters_nearby(ActorGroup.Monsters, HUNT_RADIUS)
         else
-            -- Hanya terdeteksi jika ada monster dari TARGET_MONSTERS
             local found = game.get_closest_characters(ActorGroup.Monsters, current_pos.x, current_pos.y, current_pos.z, HUNT_RADIUS, TARGET_MONSTERS) or {}
             detected = #found > 0
         end
@@ -635,15 +658,18 @@ local function main_farming_logic()
     local monsters        = {}
     local is_target_valid = false
     pcall(function()
-        -- Cari monster dari posisi jangkar agar radius konsisten
-        local sx = ENABLE_ANCHOR_RETURN and ANCHOR_POS.x or current_pos.x
-        local sy = ENABLE_ANCHOR_RETURN and ANCHOR_POS.y or current_pos.y
-        local sz = ENABLE_ANCHOR_RETURN and ANCHOR_POS.z or current_pos.z
+        -- Cari monster dari posisi jangkar aktif agar radius konsisten
+        local anchor = get_current_anchor()
+        local sx = ENABLE_ANCHOR_RETURN and anchor.x or current_pos.x
+        local sy = ENABLE_ANCHOR_RETURN and anchor.y or current_pos.y
+        local sz = ENABLE_ANCHOR_RETURN and anchor.z or current_pos.z
         monsters        = game.get_closest_characters(ActorGroup.Monsters, sx, sy, sz, HUNT_RADIUS, TARGET_MONSTERS) or {}
         is_target_valid = game.is_target_valid()
     end)
 
     if is_target_valid or #monsters > 0 then
+        -- Update timer monster terakhir terdeteksi
+        last_monster_seen_ms = now_ms()
         if is_returning then
             actions.restore_auto_attack()
             is_returning = false
@@ -655,6 +681,10 @@ local function main_farming_logic()
             bot.attack()
         end
     else
+        -- Rotasi spot hanya jika anchor return aktif dan ada lebih dari 1 spot
+        if ENABLE_ANCHOR_RETURN and #ANCHOR_SPOTS > 1 and (now_ms() - last_monster_seen_ms) >= ANCHOR_ROTATE_TIMEOUT then
+            rotate_anchor()
+        end
         manage_patrol_movement(current_pos)
     end
 end
@@ -685,7 +715,7 @@ repeat
             main_farming_logic()
         end
 
-        sleep(300)
+        sleep(math.random(250, 400))
     end
 
     -- Jika keluar loop karena remote stop, tunggu perintah !start
