@@ -541,6 +541,8 @@ local function manage_weapon_switch(monsters)
         actions.display_message("Senjata utama dipasang.")
     end)
 end
+
+local function manage_patrol_movement(current_pos)
     if not ENABLE_ANCHOR_RETURN then return end
 
     local anchor = get_current_anchor()
