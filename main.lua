@@ -21,6 +21,14 @@ local TARGET_MONSTERS   = { "Assassin Builder A", "[50] Assassin Builder A" }
 
 local ENABLE_ANCHOR_RETURN = true  -- true = bot kembali ke jangkar saat tidak ada monster
 
+-- Auto switch ke senjata utama saat monster terdeteksi
+-- "LISTED" = hanya switch saat monster dari TARGET_MONSTERS terdeteksi
+-- "ANY"    = switch saat monster apapun terdeteksi
+local ENABLE_AUTO_WEAPON_SWITCH  = true
+local WEAPON_SWITCH_DETECTION    = "LISTED"  -- "LISTED" atau "ANY"
+local WEAPON_SWITCH_BAR          = 1   -- Tab action bar senjata utama (1-based)
+local WEAPON_SWITCH_CELL         = 1   -- Slot senjata utama (1-based)
+
 -- Deteksi awal farming — script tidak aktif penuh sampai monster terdeteksi
 -- "LISTED" = tunggu monster dari TARGET_MONSTERS
 -- "ANY"    = tunggu monster apapun dalam HUNT_RADIUS
@@ -43,13 +51,20 @@ local ENABLE_DEATH_LOG = true
 
 -- Blacklist player — bot AFK jika player yang diblacklist terdeteksi di radius
 -- Bot otomatis jalan kembali jika player sudah keluar dari radius
-local ENABLE_BLACKLIST        = true
-local BLACKLIST_RADIUS        = 500   -- Radius pemantauan player blacklist
-local BLACKLIST_CHECK_INTERVAL = 2000 -- Interval pengecekan dalam ms (jangan terlalu kecil)
+local ENABLE_BLACKLIST         = true
+local BLACKLIST_RADIUS         = 500   -- Radius pemantauan player blacklist
+local BLACKLIST_CHECK_INTERVAL = 2000  -- Interval pengecekan dalam ms (jangan terlalu kecil)
 local PLAYER_BLACKLIST = {
     -- "NamaMusuh1",
     -- "NamaMusuh2",
 }
+
+-- Player alert — whisper ke whitelist jika ada player lain terdeteksi di radius
+-- Tidak AFK, hanya notifikasi saja
+local ENABLE_PLAYER_ALERT         = true
+local PLAYER_ALERT_RADIUS         = 300   -- Radius pemantauan
+local PLAYER_ALERT_INTERVAL       = 10000 -- Interval pengecekan dalam ms (default 10 detik)
+local PLAYER_ALERT_COOLDOWN       = 60000 -- Cooldown per nama agar tidak spam (default 60 detik)
 
 -- ============================================================
 -- ANIMUS
@@ -139,6 +154,9 @@ local remote_stopped             = false  -- true jika bot dimatikan via remote 
 local blacklist_detected         = false  -- true saat player blacklist terdeteksi di radius
 local last_blacklist_check_ms    = 0
 local last_inventory_check_ms    = 0
+local last_player_alert_check_ms = 0
+local player_alert_cooldowns     = {}  -- Tracking cooldown per nama player
+local weapon_switched            = false  -- true setelah senjata utama dipasang
 local current_anchor_index       = 1      -- Index spot aktif saat ini
 local last_monster_seen_ms       = now_ms()  -- Terakhir kali monster terdeteksi di spot aktif
 local session_start_ms           = now_ms()  -- Waktu script dijalankan, untuk format timestamp
@@ -361,6 +379,41 @@ local function check_blacklist(current_pos)
     end
 end
 
+local function manage_player_alert(current_pos)
+    if not ENABLE_PLAYER_ALERT then return end
+    if #REMOTE_WHITELIST == 0 then return end
+
+    local current_ms = now_ms()
+    if (current_ms - last_player_alert_check_ms) < PLAYER_ALERT_INTERVAL then return end
+    last_player_alert_check_ms = current_ms
+
+    pcall(function()
+        local players = game.get_closest_characters(ActorGroup.OtherPlayers, current_pos.x, current_pos.y, current_pos.z, PLAYER_ALERT_RADIUS, {}) or {}
+        for _, player in ipairs(players) do
+            local name = game.get_character_name(player.ptr) or ""
+            if name == "" then goto continue end
+
+            -- Skip jika nama ada di whitelist (teman sendiri)
+            if is_whitelisted(name) then goto continue end
+
+            -- Skip jika masih dalam cooldown
+            local last_alerted = player_alert_cooldowns[name] or 0
+            if (current_ms - last_alerted) < PLAYER_ALERT_COOLDOWN then goto continue end
+
+            -- Kirim notifikasi ke whitelist
+            player_alert_cooldowns[name] = current_ms
+            local msg = "[Player Alert] " .. name .. " terdeteksi di radius! Jarak: " .. math.floor(player.dist)
+            actions.display_message(msg)
+            for _, wname in ipairs(REMOTE_WHITELIST) do
+                actions.send_private_message(wname, msg)
+                sleep(500)
+            end
+
+            ::continue::
+        end
+    end)
+end
+
 local function handle_player_death()
     local pending_death_log = nil  -- Ditahan sampai player hidup kembali
 
@@ -402,6 +455,7 @@ local function handle_player_death()
     actions.restore_auto_attack()
     is_returning    = false
     farming_started = false  -- Tunggu monster terdeteksi lagi setelah revive
+    weapon_switched = false  -- Switch senjata ulang setelah revive
 
     local still_dead = false
     pcall(function() still_dead = game.is_player_dead() end)
@@ -468,7 +522,25 @@ local function rotate_anchor()
     actions.display_message("Rotasi spot: " .. prev .. " → " .. current_anchor_index)
 end
 
-local function manage_patrol_movement(current_pos)
+local function manage_weapon_switch(monsters)
+    if not ENABLE_AUTO_WEAPON_SWITCH then return end
+    if weapon_switched then return end
+
+    local should_switch = false
+    if WEAPON_SWITCH_DETECTION == "ANY" then
+        should_switch = #monsters > 0 or game.is_target_valid()
+    else
+        should_switch = #monsters > 0
+    end
+
+    if not should_switch then return end
+
+    pcall(function()
+        bot.switch_weapon(WEAPON_SWITCH_BAR - 1, WEAPON_SWITCH_CELL - 1)
+        weapon_switched = true
+        actions.display_message("Senjata utama dipasang.")
+    end)
+end
     if not ENABLE_ANCHOR_RETURN then return end
 
     local anchor = get_current_anchor()
@@ -640,6 +712,7 @@ local function main_farming_logic()
     if check_for_gm(current_pos) then return end
     check_gm_gone(current_pos)
     check_blacklist(current_pos)
+    manage_player_alert(current_pos)
 
     -- Selama GM atau blacklist player masih ada, skip farming
     if gm_detected or blacklist_detected then return end
@@ -670,6 +743,7 @@ local function main_farming_logic()
     if is_target_valid or #monsters > 0 then
         -- Update timer monster terakhir terdeteksi
         last_monster_seen_ms = now_ms()
+        manage_weapon_switch(monsters)
         if is_returning then
             actions.restore_auto_attack()
             is_returning = false
