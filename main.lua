@@ -453,9 +453,10 @@ local function handle_player_death()
     -- Cleanup state terlepas dari siapa yang revive
     bot.clear_queue()
     actions.restore_auto_attack()
-    is_returning    = false
-    farming_started = false  -- Tunggu monster terdeteksi lagi setelah revive
-    weapon_switched = false  -- Switch senjata ulang setelah revive
+    is_returning         = false
+    farming_started      = false  -- Tunggu sampai di anchor & monster terdeteksi lagi
+    weapon_switched      = false  -- Switch senjata ulang setelah revive
+    last_monster_seen_ms = now_ms()  -- Reset timer rotasi agar tidak langsung rotasi spot
 
     local still_dead = false
     pcall(function() still_dead = game.is_player_dead() end)
@@ -686,6 +687,12 @@ end
 local function check_farming_started(current_pos)
     if farming_started then return true end
 
+    -- Jika anchor return aktif, pastikan player sudah tiba di anchor sebelum farming dimulai
+    if ENABLE_ANCHOR_RETURN then
+        local anchor = get_current_anchor()
+        if get_distance(current_pos, anchor) > ARRIVAL_TOLERANCE then return false end
+    end
+
     local detected = false
     pcall(function()
         if FARMING_START_DETECTION == "ANY" then
@@ -728,6 +735,7 @@ local function main_farming_logic()
     manage_player_locking()
 
     -- Tunggu sampai monster terdeteksi sebelum farming logic aktif
+    -- Jika anchor return aktif, pastikan player sudah tiba di anchor dulu
     if not check_farming_started(current_pos) then return end
 
     local monsters        = {}
